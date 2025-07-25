@@ -2,15 +2,28 @@
 
 import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Checkbox } from "@/components/ui/checkbox"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { Shield, Mail, MailOpen, CheckSquare, Scan, AlertTriangle, LogOut, Menu, X } from "lucide-react"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+import { Shield, Mail, MailOpen, CheckSquare, Scan, AlertTriangle, LogOut, Menu, X, Loader2, Inbox, ChevronLeft, ChevronRight, Filter } from "lucide-react"
 import { ScanResultsModal } from "@/components/scan-results-modal"
 import { useAuth } from "@clerk/nextjs"
 import getTokensfromUserId from "@/lib/func/getTokens"
+import { motion } from "framer-motion"
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from "@/components/ui/table"
+import { ScrollArea } from "@/components/ui/scroll-area"
+import { Separator } from "@/components/ui/separator"
+import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet"
+
 const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:5000"
 async function fetchEmails(token: any) {
   const response = await fetch(`${backendUrl}/get-messages/`, {
@@ -20,72 +33,90 @@ async function fetchEmails(token: any) {
     },
     body: JSON.stringify({ token })
   })
-  if (!response.ok) throw new Error("Failed to fetch emails")
-  // console.log("Response status:", response.status)
-  // console.log("Response headers:", response.headers)
+  
+  console.log("Response status:", response.status)
   console.log("Request body:", response)
+  
+  if (response.status !== 200) {
+    throw new Error(`Failed to fetch emails: ${response.status} ${response.statusText}`)
+  }
+  
   const data = await response.json()
   return data
 }
 
 type Email = {
-  id: number
+  id: string
   sender: string
+  sender_email: string
   subject: string
-  date: string
   preview: string
   phishingScore: number
   isPhishing: boolean
   selected?: boolean
-  urls?: string
+  urls?: string[]
+  body: string
 }
 
 export default function Dashboard() {
-
   const { getToken } = useAuth()
   const [emails, setEmails] = useState<Email[]>([])
+  const [isLoadingEmails, setIsLoadingEmails] = useState(true)
+  const [emailError, setEmailError] = useState<string | null>(null)
   const [scanMode, setScanMode] = useState<"all" | "unread" | "selected">("all")
   const [isScanning, setIsScanning] = useState(false)
   const [showResults, setShowResults] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  
+  const [previewEmail, setPreviewEmail] = useState<Email | null>(null)
+  const [activeTab, setActiveTab] = useState("all")
+
   useEffect(() => {
     async function loadEmails() {
-      const tokensArr = await getTokensfromUserId()
-      if (!tokensArr || !Array.isArray(tokensArr) || tokensArr.length === 0) {
-        console.error("No token data found")
-        return
-      }
-      const tokenObj = tokensArr[0]
-      const token = {
-        token: {
-          access_token: tokenObj.token || "",
-          client_id: process.env.NEXT_PUBLIC_CLIENT_ID || "",
-          client_secret: process.env.NEXT_PUBLIC_CLIENT_SECRET || "",
-          userId: tokenObj.provider_user_id || "",
-          token_type: "Bearer",
-        },
-        maxResults: 10,
-        labelIds: ["INBOX"],
-        includeSpamTrash: false
-      }
+      setIsLoadingEmails(true)
+      setEmailError(null)
+      
       try {
+        const tokensArr = await getTokensfromUserId()
+        if (!tokensArr || !Array.isArray(tokensArr) || tokensArr.length === 0) {
+          throw new Error("No token data found")
+        }
+        
+        const tokenObj = tokensArr[0]
+        const token = {
+          token: {
+            access_token: tokenObj.token || "",
+            client_id: process.env.NEXT_PUBLIC_CLIENT_ID || "",
+            client_secret: process.env.NEXT_PUBLIC_CLIENT_SECRET || "",
+            userId: tokenObj.provider_user_id || "",
+            token_type: "Bearer",
+          },
+          maxResults: 10,
+          labelIds: ["INBOX"],
+          includeSpamTrash: false
+        }
+        
         const data = await fetchEmails(token)
         console.log("Fetched emails:", data)
         const emailsArr = Array.isArray(data.messages) ? data.messages : []
         const mappedEmails: Email[] = emailsArr.map((emailObj: any) => ({
           id: emailObj.id,
-          sender: emailObj.sender_name || emailObj.sender_email || "Unknown",
+          sender: emailObj.sender_name || "Unknown",
+          sender_email: emailObj.sender_email || "",
           subject: emailObj.subject || "",
-          date: "", // No date in schema, leave blank or parse if available
           preview: emailObj.body?.slice(0, 100) || "",
-          phishingScore: 0, // Default, update if you have scoring logic
-          isPhishing: false, // Default, update if you have detection logic
+          body: emailObj.body || "",
+          urls: emailObj.urls || [],
+          phishingScore: 0, 
+          isPhishing: false, 
           selected: false
         }))
         setEmails(mappedEmails)
-      } catch {
+      } catch (error) {
+        console.error("Failed to load emails:", error)
+        setEmailError(error instanceof Error ? error.message : "Failed to load emails")
         setEmails([])
+      } finally {
+        setIsLoadingEmails(false)
       }
     }
     loadEmails()
@@ -98,47 +129,64 @@ export default function Dashboard() {
     if (scanMode === "all") {
       emailsToScan = emails
     } else if (scanMode === "unread") {
-      // Assuming unread logic, update as needed
       emailsToScan = emails.filter(email => !email.isPhishing)
     } else if (scanMode === "selected") {
       emailsToScan = emails.filter(email => email.selected)
     }
-
-    // Call /check-phishing API for each email
-    const scanResults = await Promise.all(
-      emailsToScan.map(async (email) => {
-      const payload = {
-        body: email.preview,
+    console.log("Emails to scan:", emailsToScan)
+    // Prepare payload with all emails in a list
+    const payload = {
+      emails: emailsToScan.map(email => ({
+        id: email.id,
+        body: email.body,
         subject: email.subject,
-        urls: email.urls || "", // Add logic to extract URLs if available
-        sender: email.sender,
-      }
-      console.log("Scanning email:", payload)
-      try {
-        const res = await fetch(`${backendUrl}/check-phishing`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        })
-        if (!res.ok) throw new Error("Scan failed")
-        const result = await res.json()
-        return { ...email, phishingScore: result.phishingScore, isPhishing: result.isPhishing }
-      } catch {
-        return { ...email, phishingScore: 0, isPhishing: false }
-      }
+        urls: Array.isArray(email.urls) ? email.urls.join(', ') : email.urls || "",
+        sender: email.sender_email,
+      }))
+    }
+    
+    console.log("Scanning emails:", payload)    
+    try {
+      const res = await fetch(`${backendUrl}/check-phishing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
       })
-    )
-    setEmails(
-      emails.map(email =>
-      scanResults.find(e => e.id === email.id) || email
+      console.log("Scan response Result:", res)
+      if (!res.ok) throw new Error("Scan failed")
+      
+      const results = await res.json()
+      setEmails(prevEmails =>
+        prevEmails.map(email => {
+          const scanResult = results.find((result: any) => result.id === email.id)
+          if (scanResult) {
+            return {
+              ...email,
+              phishingScore: scanResult.phishingScore,
+              isPhishing: scanResult.isPhishing
+            }
+          }
+          return email
+        })
       )
-    )
+    } catch (error) {
+      console.error("Scan failed:", error)
+      // Reset phishing scores on error
+      setEmails(prevEmails =>
+        prevEmails.map(email => ({
+          ...email,
+          phishingScore: 0,
+          isPhishing: false
+        }))
+      )
+    }
+    
     await new Promise((resolve) => setTimeout(resolve, 2000))
     setIsScanning(false)
     setShowResults(true)
   }
 
-  const handleEmailSelect = (emailId: number) => {
+  const handleEmailSelect = (emailId: string) => {
     setEmails(emails.map((email) => (email.id === emailId ? { ...email, selected: !email.selected } : email)))
   }
 
@@ -155,193 +203,566 @@ export default function Dashboard() {
   }
 
   const phishingEmails = emails.filter((email) => email.isPhishing)
+  const safeEmails = emails.filter((email) => !email.isPhishing)
+  const selectedEmails = emails.filter((email) => email.selected)
+  
+  const filteredEmails = activeTab === "all" 
+    ? emails
+    : activeTab === "phishing" 
+      ? phishingEmails 
+      : activeTab === "safe" 
+        ? safeEmails 
+        : selectedEmails
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Top Navigation */}
-      {/* <header className="bg-white border-b border-gray-200 px-4 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <Button variant="ghost" size="icon" className="md:hidden" onClick={() => setSidebarOpen(!sidebarOpen)}>
-              {sidebarOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-            </Button>
-            <div className="flex items-center space-x-3">
-              <Shield className="w-8 h-8 text-blue-600" />
-              <h1 className="text-xl font-semibold text-gray-900 hidden sm:block">Gmail Phishing Detector</h1>
+      <div className="flex h-screen overflow-hidden">
+        {/* Desktop Sidebar */}
+        <aside className="hidden lg:block w-64 border-r bg-white">
+          <div className="flex h-full flex-col">
+            <div className="flex items-center gap-2 px-6 py-4 border-b">
+              <div className="p-1.5 bg-blue-600 rounded text-white">
+                <Shield className="h-5 w-5" />
+              </div>
+              <div>
+                <h1 className="font-semibold text-lg">PhishGuard</h1>
+                <p className="text-xs text-gray-500">Email Security Dashboard</p>
+              </div>
             </div>
-          </div>
 
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="flex items-center space-x-2 hover:bg-gray-100">
-                <Avatar className="w-8 h-8">
-                  <AvatarImage src="/placeholder.svg?height=32&width=32" />
-                  <AvatarFallback>JD</AvatarFallback>
-                </Avatar>
-                <span className="hidden sm:inline text-sm font-medium">John Doe</span>
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuItem>
-                <LogOut className="w-4 h-4 mr-2" />
-                Logout
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-      </header> */}
+            <nav className="flex-1 space-y-2 px-4 py-6">
+              <div className="space-y-1.5">
+                <h2 className="px-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Scan Options
+                </h2>
+                <Separator className="my-2" />
+                <Button
+                  variant={scanMode === "all" ? "default" : "ghost"}
+                  size="sm"
+                  className={`w-full justify-start text-sm h-10 ${
+                    scanMode === "all" ? "" : "text-gray-700"
+                  }`}
+                  onClick={() => setScanMode("all")}
+                >
+                  <Mail className="w-4 h-4 mr-2" />
+                  Scan All Emails
+                </Button>
+                <Button
+                  variant={scanMode === "unread" ? "default" : "ghost"}
+                  size="sm"
+                  className={`w-full justify-start text-sm h-10 ${
+                    scanMode === "unread" ? "" : "text-gray-700"
+                  }`}
+                  onClick={() => setScanMode("unread")}
+                >
+                  <MailOpen className="w-4 h-4 mr-2" />
+                  Scan Unread Emails
+                </Button>
+                <Button
+                  variant={scanMode === "selected" ? "default" : "ghost"}
+                  size="sm"
+                  className={`w-full justify-start text-sm h-10 ${
+                    scanMode === "selected" ? "" : "text-gray-700"
+                  }`}
+                  onClick={() => setScanMode("selected")}
+                >
+                  <CheckSquare className="w-4 h-4 mr-2" />
+                  Scan Selected Emails
+                </Button>
+              </div>
 
-      <div className="flex">
-        {/* Sidebar */}
-        <aside
-          className={`${sidebarOpen ? "translate-x-0" : "-translate-x-full"} md:translate-x-0 fixed md:static inset-y-0 left-0 z-50 w-64 bg-white border-r border-gray-200 transition-transform duration-300 ease-in-out`}
-        >
-          <div className="p-4 pt-6">
-            <h2 className="text-lg font-semibold text-gray-900 mb-4">Scan Options</h2>
-            <div className="space-y-2">
-              <Button
-                variant={scanMode === "all" ? "default" : "ghost"}
-                className="w-full justify-start"
-                onClick={() => setScanMode("all")}
+              <div className="mt-8 space-y-1.5">
+                <h2 className="px-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                  Statistics
+                </h2>
+                <Separator className="my-2" />
+                <div className="bg-gray-50 rounded-md p-3">
+                  <dl className="grid grid-cols-1 gap-1">
+                    <div className="flex justify-between">
+                      <dt className="text-sm text-gray-500">Total Emails:</dt>
+                      <dd className="text-sm font-medium">{emails.length}</dd>
+                    </div>
+                    <div className="flex justify-between">
+                      <dt className="text-sm text-gray-500">Phishing Detected:</dt>
+                      <dd className={`text-sm font-medium ${phishingEmails.length > 0 ? 'text-red-500' : ''}`}>
+                        {phishingEmails.length}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between">
+                      <dt className="text-sm text-gray-500">Selected:</dt>
+                      <dd className="text-sm font-medium">{selectedEmails.length}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </div>
+            </nav>
+
+            <div className="p-4 border-t">
+              <Button 
+                onClick={handleScan} 
+                disabled={isScanning} 
+                className="w-full"
               >
-                <Mail className="w-4 h-4 mr-2" />
-                Scan All Emails
-              </Button>
-              <Button
-                variant={scanMode === "unread" ? "default" : "ghost"}
-                className="w-full justify-start"
-                onClick={() => setScanMode("unread")}
-              >
-                <MailOpen className="w-4 h-4 mr-2" />
-                Scan Unread Emails
-              </Button>
-              <Button
-                variant={scanMode === "selected" ? "default" : "ghost"}
-                className="w-full justify-start"
-                onClick={() => setScanMode("selected")}
-              >
-                <CheckSquare className="w-4 h-4 mr-2" />
-                Scan Selected Emails
+                {isScanning ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    <span>Scanning...</span>
+                  </>
+                ) : (
+                  <>
+                    <Scan className="w-4 h-4 mr-2" />
+                    <span>Start Scan</span>
+                  </>
+                )}
               </Button>
             </div>
           </div>
         </aside>
 
-        {/* Overlay for mobile */}
-        {sidebarOpen && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 z-40 md:hidden" onClick={() => setSidebarOpen(false)} />
-        )}
+        {/* Mobile Sidebar */}
+        <Sheet>
+          <SheetTrigger asChild>
+            <Button variant="outline" size="icon" className="lg:hidden absolute top-4 left-4 z-50">
+              <Menu className="h-5 w-5" />
+            </Button>
+          </SheetTrigger>
+          <SheetContent side="left" className="w-64 p-0">
+            <div className="flex h-full flex-col">
+              <div className="flex items-center gap-2 px-6 py-4 border-b">
+                <div className="p-1.5 bg-blue-600 rounded text-white">
+                  <Shield className="h-5 w-5" />
+                </div>
+                <div>
+                  <h1 className="font-semibold text-lg">PhishGuard</h1>
+                  <p className="text-xs text-gray-500">Email Security</p>
+                </div>
+              </div>
+
+              <nav className="flex-1 space-y-2 px-4 py-6">
+                <div className="space-y-1.5">
+                  <h2 className="px-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Scan Options
+                  </h2>
+                  <Separator className="my-2" />
+                  <Button
+                    variant={scanMode === "all" ? "default" : "ghost"}
+                    size="sm"
+                    className={`w-full justify-start text-sm h-10 ${
+                      scanMode === "all" ? "" : "text-gray-700"
+                    }`}
+                    onClick={() => setScanMode("all")}
+                  >
+                    <Mail className="w-4 h-4 mr-2" />
+                    Scan All Emails
+                  </Button>
+                  <Button
+                    variant={scanMode === "unread" ? "default" : "ghost"}
+                    size="sm"
+                    className={`w-full justify-start text-sm h-10 ${
+                      scanMode === "unread" ? "" : "text-gray-700"
+                    }`}
+                    onClick={() => setScanMode("unread")}
+                  >
+                    <MailOpen className="w-4 h-4 mr-2" />
+                    Scan Unread Emails
+                  </Button>
+                  <Button
+                    variant={scanMode === "selected" ? "default" : "ghost"}
+                    size="sm"
+                    className={`w-full justify-start text-sm h-10 ${
+                      scanMode === "selected" ? "" : "text-gray-700"
+                    }`}
+                    onClick={() => setScanMode("selected")}
+                  >
+                    <CheckSquare className="w-4 h-4 mr-2" />
+                    Scan Selected Emails
+                  </Button>
+                </div>
+
+                <div className="mt-8 space-y-1.5">
+                  <h2 className="px-2 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                    Statistics
+                  </h2>
+                  <Separator className="my-2" />
+                  <div className="bg-gray-50 rounded-md p-3">
+                    <dl className="grid grid-cols-1 gap-1">
+                      <div className="flex justify-between">
+                        <dt className="text-sm text-gray-500">Total Emails:</dt>
+                        <dd className="text-sm font-medium">{emails.length}</dd>
+                      </div>
+                      <div className="flex justify-between">
+                        <dt className="text-sm text-gray-500">Phishing Detected:</dt>
+                        <dd className={`text-sm font-medium ${phishingEmails.length > 0 ? 'text-red-500' : ''}`}>
+                          {phishingEmails.length}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between">
+                        <dt className="text-sm text-gray-500">Selected:</dt>
+                        <dd className="text-sm font-medium">{selectedEmails.length}</dd>
+                      </div>
+                    </dl>
+                  </div>
+                </div>
+              </nav>
+
+              <div className="p-4 border-t">
+                <Button 
+                  onClick={handleScan} 
+                  disabled={isScanning} 
+                  className="w-full"
+                >
+                  {isScanning ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <span>Scanning...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Scan className="w-4 h-4 mr-2" />
+                      <span>Start Scan</span>
+                    </>
+                  )}
+                </Button>
+              </div>
+            </div>
+          </SheetContent>
+        </Sheet>
 
         {/* Main Content */}
-        <main className="flex-1 p-4 md:p-6">
-          <div className="max-w-7xl mx-auto">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between mb-6">
-              <div>
-                <h2 className="text-2xl font-bold text-gray-900">Inbox Scanner</h2>
-                <p className="text-gray-600 mt-1">
-                  {scanMode === "all" && "Scanning all emails in your inbox"}
-                  {scanMode === "unread" && "Scanning unread emails only"}
-                  {scanMode === "selected" && "Scanning selected emails only"}
-                </p>
-              </div>
-              <Button onClick={handleScan} disabled={isScanning} className="mt-4 sm:mt-0 bg-blue-600 hover:bg-blue-700">
-                {isScanning ? (
-                  <>
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2" />
-                    Scanning...
-                  </>
-                ) : (
-                  <>
-                    <Scan className="w-4 h-4 mr-2" />
-                    Start Scan
-                  </>
-                )}
-              </Button>
-            </div>
-
-            {/* Email List */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center justify-between">
-                  <span>Inbox ({emails.length} emails)</span>
-                  {phishingEmails.length > 0 && (
-                    <Badge variant="destructive" className="flex items-center space-x-1">
-                      <AlertTriangle className="w-3 h-3" />
-                      <span>{phishingEmails.length} Phishing Detected</span>
-                    </Badge>
+        <div className="flex-1 flex flex-col overflow-y-auto">
+          <header className="bg-white border-b sticky top-0 z-30">
+            <div className="px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+              <div className="lg:hidden"></div> {/* Spacer for mobile */}
+              <h1 className="text-xl font-semibold">Email Security Dashboard</h1>
+              <div className="hidden sm:flex gap-2 ml-auto lg:ml-0">
+                <Button 
+                  onClick={handleScan} 
+                  disabled={isScanning}
+                  className="lg:hidden"
+                >
+                  {isScanning ? (
+                    <>
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      <span>Scanning...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Scan className="w-4 h-4 mr-2" />
+                      <span>Start Scan</span>
+                    </>
                   )}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="p-0">
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead className="bg-gray-50 border-b">
-                      <tr>
-                        {scanMode === "selected" && (
-                          <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                            Select
-                          </th>
-                        )}
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Sender
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Subject
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden md:table-cell">
-                          Date
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider hidden lg:table-cell">
-                          Preview
-                        </th>
-                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                          Risk Score
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-200">
-                      {emails.map((email, idx) => (
-                        <tr
-                          key={email.id ?? idx}
-                          className={`hover:bg-gray-50 transition-colors ${getRowColor(email.phishingScore)}`}
-                        >
-                          {scanMode === "selected" && (
-                            <td className="px-4 py-4">
-                              <Checkbox checked={email.selected} onCheckedChange={() => handleEmailSelect(email.id)} />
-                            </td>
-                          )}
-                          <td className="px-4 py-4">
-                            <div className="text-sm font-medium text-gray-900">{email.sender}</div>
-                          </td>
-                          <td className="px-4 py-4">
-                            <div className="text-sm text-gray-900 font-medium">{email.subject}</div>
-                          </td>
-                          <td className="px-4 py-4 text-sm text-gray-500 hidden md:table-cell">{email.date}</td>
-                          <td className="px-4 py-4 text-sm text-gray-500 hidden lg:table-cell max-w-xs">
-                            <div className="truncate">{email.preview}</div>
-                          </td>
-                          <td className="px-4 py-4">
-                            <Badge className={getScoreColor(email.phishingScore)}>
-                              {email.isPhishing ? (
-                                <>
-                                  <AlertTriangle className="w-3 h-3 mr-1" />
-                                  Flagged
-                                </>
-                              ) : (
-                                `${email.phishingScore}/100`
-                              )}
-                            </Badge>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                </Button>
+              </div>
+            </div>
+          </header>
+
+          <main className="flex-1 px-4 sm:px-6 lg:px-8 py-6 bg-gray-50">
+            {isLoadingEmails ? (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                className="flex flex-col items-center justify-center min-h-[500px]"
+              >
+                <div className="relative mb-4">
+                  <div className="w-16 h-16 border-4 border-blue-100 rounded-full"></div>
+                  <div className="absolute inset-0 w-16 h-16 border-4 border-blue-600 rounded-full animate-spin border-t-transparent"></div>
                 </div>
-              </CardContent>
-            </Card>
-          </div>
-        </main>
+                <h2 className="text-2xl font-semibold text-gray-900 mb-2">Loading your emails...</h2>
+                <p className="text-gray-600 text-center">Please wait while we securely fetch your inbox</p>
+              </motion.div>
+            ) : emailError ? (
+              <motion.div 
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex flex-col items-center justify-center min-h-[500px]"
+              >
+                <div className="p-4 bg-red-100 rounded-full mb-4">
+                  <AlertTriangle className="h-12 w-12 text-red-500" />
+                </div>
+                <h2 className="text-2xl font-semibold text-gray-900 mb-2">Failed to load emails</h2>
+                <p className="text-gray-600 mb-6 text-center max-w-md">{emailError}</p>
+                <Button 
+                  onClick={() => window.location.reload()} 
+                  className="bg-blue-600 hover:bg-blue-700 transition-all"
+                >
+                  Try Again
+                </Button>
+              </motion.div>
+            ) : (
+              <motion.div 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.4 }}
+                className="space-y-6"
+              >
+                {/* Stats Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-gray-500">Total Emails</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-3xl font-bold">{emails.length}</div>
+                      <p className="text-xs text-gray-500 mt-1">In your inbox</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-gray-500">Phishing Detected</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="flex items-center">
+                        <div className={`text-3xl font-bold ${phishingEmails.length > 0 ? 'text-red-600' : ''}`}>{phishingEmails.length}</div>
+                        {phishingEmails.length > 0 && (
+                          <Badge variant="destructive" className="ml-2">
+                            Risk
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-gray-500 mt-1">Potentially dangerous</p>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm font-medium text-gray-500">Selected Emails</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="text-3xl font-bold">{selectedEmails.length}</div>
+                      <p className="text-xs text-gray-500 mt-1">Ready to scan</p>
+                    </CardContent>
+                  </Card>
+                </div>
+                
+                {/* Email List */}
+                <Card className="shadow-sm">
+                  <CardHeader className="pb-0">
+                    <div className="flex items-center justify-between">
+                      <CardTitle>Inbox</CardTitle>
+                      <div className="flex items-center space-x-2">
+                        <Badge variant="outline" className="hidden sm:flex">
+                          {scanMode === "all" && "Scanning all emails"}
+                          {scanMode === "unread" && "Scanning unread emails"}
+                          {scanMode === "selected" && "Scanning selected emails"}
+                        </Badge>
+                        <Button 
+                          onClick={handleScan} 
+                          disabled={isScanning}
+                          size="sm"
+                          className="sm:hidden"
+                        >
+                          {isScanning ? <Loader2 className="h-4 w-4 animate-spin" /> : <Scan className="h-4 w-4" />}
+                        </Button>
+                      </div>
+                    </div>
+                    <Tabs 
+                      defaultValue="all" 
+                      className="mt-4"
+                      onValueChange={setActiveTab}
+                      value={activeTab}
+                    >
+                      <TabsList className="grid grid-cols-4">
+                        <TabsTrigger value="all">All ({emails.length})</TabsTrigger>
+                        <TabsTrigger value="phishing" className={phishingEmails.length > 0 ? 'text-red-500' : ''}>
+                          Phishing ({phishingEmails.length})
+                        </TabsTrigger>
+                        <TabsTrigger value="safe">Safe ({safeEmails.length})</TabsTrigger>
+                        <TabsTrigger value="selected">Selected ({selectedEmails.length})</TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+                  </CardHeader>
+                  <CardContent className="pt-4 px-0">
+                    {filteredEmails.length === 0 ? (
+                      <div className="py-10 text-center text-gray-500">
+                        <div className="bg-gray-100 p-3 rounded-full inline-block mb-3">
+                          <Mail className="w-10 h-10 text-gray-400" />
+                        </div>
+                        <p className="text-lg">No emails found</p>
+                        {activeTab === "phishing" && <p className="text-sm mt-1">Good news! No phishing emails detected.</p>}
+                        {activeTab === "selected" && <p className="text-sm mt-1">Select emails to scan them specifically.</p>}
+                      </div>
+                    ) : (
+                      <ScrollArea className="h-[calc(100vh-400px)] min-h-[300px]">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              {scanMode === "selected" && (
+                                <TableHead className="w-[50px]">
+                                  <span className="sr-only">Select</span>
+                                </TableHead>
+                              )}
+                              <TableHead className="w-[250px]">Sender</TableHead>
+                              <TableHead>Subject</TableHead>
+                              <TableHead className="hidden lg:table-cell">Preview</TableHead>
+                              <TableHead className="w-[100px] text-center">Risk</TableHead>
+                              <TableHead className="w-[80px] text-right">Action</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {filteredEmails.map((email, idx) => (
+                              <TableRow
+                                key={email.id ?? idx}
+                                className={email.isPhishing ? 'bg-red-50 hover:bg-red-100' : 'hover:bg-gray-50'}
+                              >
+                                {scanMode === "selected" && (
+                                  <TableCell>
+                                    <Checkbox 
+                                      checked={email.selected} 
+                                      onCheckedChange={() => handleEmailSelect(email.id)}
+                                      aria-label="Select email"
+                                    />
+                                  </TableCell>
+                                )}
+                                <TableCell>
+                                  <div className="flex items-center space-x-2">
+                                    <Avatar className="h-8 w-8">
+                                      <AvatarFallback className="bg-blue-100 text-blue-600">
+                                        {email.sender.charAt(0)}
+                                      </AvatarFallback>
+                                    </Avatar>
+                                    <div>
+                                      <p className="text-sm font-medium">{email.sender}</p>
+                                      <p className="text-xs text-gray-500 truncate max-w-[180px]">{email.sender_email}</p>
+                                    </div>
+                                  </div>
+                                </TableCell>
+                                <TableCell>
+                                  <p className="text-sm font-medium truncate max-w-[200px]">{email.subject}</p>
+                                </TableCell>
+                                <TableCell className="hidden lg:table-cell">
+                                  <p className="text-sm text-gray-500 truncate max-w-[300px]">{email.preview}</p>
+                                </TableCell>
+                                <TableCell className="text-center">
+                                  <Badge className={email.isPhishing 
+                                    ? "bg-red-100 text-red-700 hover:bg-red-200"
+                                    : getScoreColor(email.phishingScore)}
+                                  >
+                                    {email.isPhishing ? (
+                                      <>
+                                        <AlertTriangle className="w-3 h-3 mr-1" />
+                                        High
+                                      </>
+                                    ) : (
+                                      email.phishingScore > 0 ? `${email.phishingScore}/100` : "—"
+                                    )}
+                                  </Badge>
+                                </TableCell>
+                                <TableCell className="text-right">
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => setPreviewEmail(email)}
+                                  >
+                                    View
+                                  </Button>
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </ScrollArea>
+                    )}
+                  </CardContent>
+                </Card>
+              </motion.div>
+            )}
+          </main>
+        </div>
       </div>
+
+      {/* Email Preview Modal */}
+      {previewEmail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm overflow-y-auto">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 0.2 }}
+            className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] my-8 relative flex flex-col"
+          >
+            {/* Modal Header */}
+            <div className="sticky top-0 z-10 bg-white border-b border-gray-100 p-4 rounded-t-xl">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <Avatar className="h-8 w-8 border">
+                      <AvatarFallback className="bg-blue-100 text-blue-600 uppercase">
+                        {previewEmail.sender.charAt(0)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div>
+                      <div className="text-sm font-medium">{previewEmail.sender}</div>
+                      <div className="text-xs text-gray-500">{previewEmail.sender_email}</div>
+                    </div>
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900 mt-2">{previewEmail.subject}</h3>
+                </div>
+                <button
+                  onClick={() => setPreviewEmail(null)}
+                  className="p-2 rounded-full hover:bg-gray-100 transition-colors"
+                  aria-label="Close preview"
+                >
+                  <X className="h-5 w-5 text-gray-500" />
+                </button>
+              </div>
+              {previewEmail.isPhishing && (
+                <div className="mt-3 p-2.5 bg-red-50 border border-red-100 rounded-md text-red-800 text-sm flex items-start gap-2">
+                  <AlertTriangle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div>
+                    <p className="font-medium">Warning: This email has been detected as potentially malicious</p>
+                    <p className="mt-1 text-red-700 text-xs">Exercise caution with any links or attachments in this email.</p>
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            {/* Email Body */}
+            <ScrollArea className="flex-1 p-4">
+              <div 
+                className="prose prose-sm sm:prose max-w-none text-gray-700"
+                dangerouslySetInnerHTML={{ 
+                  __html: previewEmail.body.includes('<') && previewEmail.body.includes('>') 
+                    ? previewEmail.body 
+                    : previewEmail.body.replace(/\n/g, '<br/>') 
+                }}
+              />
+              
+              {previewEmail.urls && previewEmail.urls.length > 0 && (
+                <div className="mt-6 pt-4 border-t">
+                  <h4 className="text-sm font-semibold mb-2">Detected URLs ({previewEmail.urls.length})</h4>
+                  <div className="space-y-1">
+                    {previewEmail.urls.map((url, idx) => (
+                      <div key={idx} className="text-xs p-2 bg-gray-50 rounded border border-gray-200 break-all">
+                        {url}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </ScrollArea>
+            
+            {/* Modal Footer */}
+            <div className="border-t border-gray-100 p-4 bg-gray-50 flex justify-between rounded-b-xl">
+              <Button 
+                variant="ghost" 
+                size="sm"
+                onClick={() => setPreviewEmail(null)}
+              >
+                Close
+              </Button>
+              
+              {previewEmail.isPhishing && (
+                <Button 
+                  variant="destructive" 
+                  size="sm"
+                >
+                  <AlertTriangle className="h-4 w-4 mr-2" />
+                  Mark as Dangerous
+                </Button>
+              )}
+            </div>
+          </motion.div>
+        </div>
+      )}
 
       <ScanResultsModal
         open={showResults}
@@ -352,6 +773,3 @@ export default function Dashboard() {
     </div>
   )
 }
-// Define OAuthProvider type or import it if available
-type OAuthProvider = "google" | "facebook" | "github" // Add other providers as needed
-

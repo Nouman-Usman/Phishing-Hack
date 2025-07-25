@@ -9,10 +9,10 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-model = joblib.load('phishing_model.pkl')
-body_vectorizer = joblib.load('body_vectorizer.pkl')
-subject_vectorizer = joblib.load('subject_vectorizer.pkl')
-sender_enc = joblib.load('sender_encoder.pkl')
+model = joblib.load('model/phishing_model.pkl')
+body_vectorizer = joblib.load('model/body_vectorizer.pkl')
+subject_vectorizer = joblib.load('model/subject_vectorizer.pkl')
+sender_enc = joblib.load('model/sender_encoder.pkl')
 
 def extract_url_count(urls):
     return len(str(urls).split(','))
@@ -39,11 +39,6 @@ def get_model_evaluation(body, subject, urls, sender):
     X_test = hstack([X_body, X_subject, X_sender, X_misc])
     prediction = model.predict(X_test)[0]
     proba = model.predict_proba(X_test)[0]
-    if prediction == 1:
-        prediction = "Phishing"
-    else:
-        prediction = "Legitimate"
-
     return prediction, proba
 
 if __name__ == "__main__":

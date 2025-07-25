@@ -181,7 +181,6 @@ def get_messages_by_ids(token_data, message_ids, user_id="me"):
 def get_messages():
     try:
         data = request.get_json()
-        print("Received data:", data)
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
@@ -204,10 +203,7 @@ def get_messages():
         # Collect query params efficiently
         query_keys = ["maxResults", "pageToken", "q", "labelIds", "includeSpamTrash"]
         query_params = {key: data.get(key, data.get(key.lower())) for key in query_keys if data.get(key, data.get(key.lower())) is not None}
-
-        # Get userId from frontend, default to "me"
         user_id = token_data.get("userId", "me")
-        print("User Id is:", user_id)
         result = get_gmail_messages_ids(token_data, query_params if query_params else None, user_id)
         if "error" in result:
             return jsonify(result), 400
@@ -223,52 +219,63 @@ def get_messages():
             print("Messages detail fetched successfully.", messages_detail)
         if "error" in messages_detail:
             return jsonify(messages_detail), 400
-        print(f"Retrieved {len(messages_detail.get('messages', []))} messages.")
         return jsonify({
             "messages": messages_detail["messages"],
         }), 200
+    
 
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-@app.route('/check_emails', methods=['POST'])
-def check_emails():
-    """Endpoint to check emails and evaluate phishing risk."""
-    try:
-        data = request.get_json()
-        if not data or not isinstance(data, dict):
-            return jsonify({"error": "Invalid input data"}), 400
-        body = data.get('body')
-        subject = data.get('subject')
-        urls = data.get('urls', '')
-        sender = data.get('sender', '')
-        if not body or not subject or not sender:
-            return jsonify({"error": "Body, subject, and sender are required"}), 400
-        prediction, proba = get_model_evaluation(body, subject, urls, sender)
-        return jsonify({
-            "prediction": prediction,
-            "probability": proba.tolist()  # Convert numpy array to list for JSON serialization
-        }), 200
-    except Exception as e:
-        return jsonify({"error": f"Server error: {str(e)}"}), 500
 @app.route('/check-phishing', methods=['POST'])
 def check_phishing():
-    """Alias endpoint for phishing risk evaluation (same as /check_emails)."""
+    """Endpoint to check multiple emails for phishing risk."""
     try:
         data = request.get_json()
         if not data or not isinstance(data, dict):
             return jsonify({"error": "Invalid input data"}), 400
-        body = data.get('body')
-        subject = data.get('subject')
-        urls = data.get('urls', '')
-        sender = data.get('sender', '')
-        if not body or not subject or not sender:
-            return jsonify({"error": "Body, subject, and sender are required"}), 400
-        prediction, proba = get_model_evaluation(body, subject, urls, sender)
-        return jsonify({
-            "prediction": prediction,
-            "probability": proba.tolist()
-        }), 200
+        
+        emails = data.get('emails', [])
+        if not emails or not isinstance(emails, list):
+            return jsonify({"error": "Emails array is required"}), 400
+        
+        results = []
+        for email in emails:
+            email_id = email.get('id')
+            body = email.get('body', '')
+            subject = email.get('subject', '')
+            urls = email.get('urls', '')
+            sender = email.get('sender', '')
+            
+            if not body or not subject or not sender:
+                results.append({
+                    "id": email_id,
+                    "phishingScore": 0.0,
+                    "isPhishing": False,
+                    "error": "Body, subject, and sender are required"
+                })
+                continue
+            
+            try:
+                prediction, proba = get_model_evaluation(body, subject, urls, sender)
+                # Assuming prediction is 0 (not phishing) or 1 (phishing)
+                # and proba is array with [prob_not_phishing, prob_phishing]
+                phishing_score = float(proba[1]) if len(proba) > 1 else float(proba[0])
+                is_phishing = bool(prediction == 1)
+                
+                results.append({
+                    "id": email_id,
+                    "phishingScore": phishing_score,
+                    "isPhishing": is_phishing
+                })
+            except Exception as e:
+                results.append({
+                    "id": email_id,
+                    "phishingScore": 0.0,
+                    "isPhishing": False,
+                    "error": f"Model evaluation error: {str(e)}"
+                })
+        return jsonify(results), 200
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
